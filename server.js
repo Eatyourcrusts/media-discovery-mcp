@@ -107,6 +107,33 @@ async function semanticSearchCompanies(query, limit = 5) {
 async function semanticSearchAdFormats(query, limit = 5) {
   try {
     console.log(`🔍 Searching ad formats for: "${query}"`);
+
+    // Test OpenAI connection
+    console.log('🤖 Generating embedding...');
+    const response = await openai.embeddings.create({
+      model: "text-embedding-3-small",
+      input: query,
+      dimensions: 1536
+    });
+    const queryEmbedding = response.data[0].embedding;
+    console.log(`✅ Embedding generated, dimensions: ${queryEmbedding.length}`);
+
+    // Test Supabase connection
+    console.log('🗄️ Querying database...');
+    const { data: formats, error } = await supabase
+      .from('ad_formats_searchable')
+      .select('*')
+      .not('embedding', 'is', null)
+      .limit(1000);
+
+    if (error) {
+      console.error('❌ Supabase error:', error);
+      throw new Error(`Supabase error: ${error.message}`);
+    }
+    
+    console.log(`📊 Database returned ${formats.length} formats`);
+    
+    // Rest of your function...
     
     // Generate query embedding
     const response = await openai.embeddings.create({
