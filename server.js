@@ -177,6 +177,30 @@ app.get('/health', (req, res) => {
     protocol: 'SSE MCP Compliant'
   });
 });
+// Add simple API endpoints for n8n HTTP requests
+app.post('/api/search-formats', async (req, res) => {
+  try {
+    const { query, limit = 5 } = req.body;
+    console.log(`🔍 API call: searching formats for "${query}"`);
+    const result = await semanticSearchAdFormats(query, limit);
+    res.json(result);
+  } catch (error) {
+    console.error('❌ API Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/search-companies', async (req, res) => {
+  try {
+    const { query, limit = 5 } = req.body;
+    console.log(`🔍 API call: searching companies for "${query}"`);
+    const result = await semanticSearchCompanies(query, limit);
+    res.json(result);
+  } catch (error) {
+    console.error('❌ API Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // Main SSE MCP endpoint
 app.all('/mcp', (req, res) => {
