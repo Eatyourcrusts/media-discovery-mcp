@@ -44,22 +44,30 @@ async function semanticSearchCompanies(query, limit = 5) {
   try {
     console.log(`🔍 Searching companies for: "${query}"`);
     
-    // Generate query embedding
-    const response = await openai.embeddings.create({
+    // Generate query embedding with debug logging
+    console.log('🤖 Generating company embedding...');
+    const embeddingResponse = await openai.embeddings.create({
       model: "text-embedding-3-small",
       input: query,
       dimensions: 1536
     });
-    const queryEmbedding = response.data[0].embedding;
+    const queryEmbedding = embeddingResponse.data[0].embedding;
+    console.log(`✅ Company embedding generated, dimensions: ${queryEmbedding.length}`);
 
     // Get companies with embeddings
+    console.log('🗄️ Querying companies database...');
     const { data: companies, error } = await supabase
       .from('companies_searchable')
       .select('*')
       .not('embedding', 'is', null)
       .limit(1000);
 
-    if (error) throw new Error(`Supabase error: ${error.message}`);
+    if (error) {
+      console.error('❌ Companies Supabase error:', error);
+      throw new Error(`Supabase error: ${error.message}`);
+    }
+    
+    console.log(`📊 Companies database returned ${companies.length} companies`);
 
     // Calculate similarity scores
     const results = companies
@@ -107,19 +115,19 @@ async function semanticSearchCompanies(query, limit = 5) {
 async function semanticSearchAdFormats(query, limit = 5) {
   try {
     console.log(`🔍 Searching ad formats for: "${query}"`);
-
-    // Test OpenAI connection
-    console.log('🤖 Generating embedding...');
-    const response = await openai.embeddings.create({
+    
+    // Generate query embedding with debug logging
+    console.log('🤖 Generating ad formats embedding...');
+    const embeddingResponse = await openai.embeddings.create({
       model: "text-embedding-3-small",
       input: query,
       dimensions: 1536
     });
-    const queryEmbedding = response.data[0].embedding;
-    console.log(`✅ Embedding generated, dimensions: ${queryEmbedding.length}`);
+    const queryEmbedding = embeddingResponse.data[0].embedding;
+    console.log(`✅ Ad formats embedding generated, dimensions: ${queryEmbedding.length}`);
 
-    // Test Supabase connection
-    console.log('🗄️ Querying database...');
+    // Get ad formats with embeddings
+    console.log('🗄️ Querying ad formats database...');
     const { data: formats, error } = await supabase
       .from('ad_formats_searchable')
       .select('*')
@@ -127,40 +135,41 @@ async function semanticSearchAdFormats(query, limit = 5) {
       .limit(1000);
 
     if (error) {
-      console.error('❌ Supabase error:', error);
+      console.error('❌ Ad formats Supabase error:', error);
       throw new Error(`Supabase error: ${error.message}`);
     }
     
-    console.log(`📊 Database returned ${formats.length} formats`);
+    console.log(`📊 Ad formats database returned ${formats.length} formats`);
+
+    // Calculate similarity scores with debug
+    let processedCount = 0;
+    let validEmbeddingCount = 0;
     
-    // Rest of your function...
-    
-    // Generate query embedding
-    const response = await openai.embeddings.create({
-      model: "text-embedding-3-small",
-      input: query,
-      dimensions: 1536
-    });
-    const queryEmbedding = response.data[0].embedding;
-
-    // Get ad formats with embeddings
-    const { data: formats, error } = await supabase
-      .from('ad_formats_searchable')
-      .select('*')
-      .not('embedding', 'is', null)
-      .limit(1000);
-
-    if (error) throw new Error(`Supabase error: ${error.message}`);
-
-    // Calculate similarity scores
     const results = formats
       .map(format => {
+        processedCount++;
         let formatEmbedding = format.embedding;
+        
         if (typeof formatEmbedding === 'string') {
-          formatEmbedding = JSON.parse(formatEmbedding);
+          try {
+            formatEmbedding = JSON.parse(formatEmbedding);
+          } catch (parseError) {
+            console.log(`⚠️ Failed to parse embedding for format ${format.format_name}`);
+            return null;
+          }
         }
-        if (!Array.isArray(formatEmbedding)) return null;
+        
+        if (!Array.isArray(formatEmbedding)) {
+          console.log(`⚠️ Invalid embedding format for ${format.format_name}: ${typeof formatEmbedding}`);
+          return null;
+        }
+        
+        if (formatEmbedding.length !== 1536) {
+          console.log(`⚠️ Wrong embedding dimensions for ${format.format_name}: ${formatEmbedding.length}`);
+          return null;
+        }
 
+        validEmbeddingCount++;
         const similarity = cosineSimilarity(queryEmbedding, formatEmbedding);
         return { ...format, similarity };
       })
@@ -179,6 +188,7 @@ async function semanticSearchAdFormats(query, limit = 5) {
                        format.similarity > 0.4 ? 'medium' : 'low'
       }));
 
+    console.log(`📊 Processed ${processedCount} formats, ${validEmbeddingCount} had valid embeddings`);
     console.log(`✅ Found ${results.length} format matches, top similarity: ${results[0]?.similarity_score || 0}`);
 
     return {
@@ -204,7 +214,8 @@ app.get('/health', (req, res) => {
     protocol: 'SSE MCP Compliant'
   });
 });
-// Add simple API endpoints for n8n HTTP requests
+
+// Simple API endpoints for n8n HTTP requests
 app.post('/api/search-formats', async (req, res) => {
   try {
     const { query, limit = 5 } = req.body;
@@ -227,6 +238,19 @@ app.post('/api/search-companies', async (req, res) => {
     console.error('❌ API Error:', error);
     res.status(500).json({ error: error.message });
   }
+});
+
+// Debug endpoint
+app.post('/api/debug', (req, res) => {
+  console.log('🔍 Debug - Headers:', req.headers);
+  console.log('🔍 Debug - Body:', req.body);
+  console.log('🔍 Debug - Query type:', typeof req.body.query);
+  console.log('🔍 Debug - Limit type:', typeof req.body.limit);
+  res.json({ 
+    headers: req.headers,
+    body: req.body,
+    received: 'debug endpoint hit'
+  });
 });
 
 // Main SSE MCP endpoint
