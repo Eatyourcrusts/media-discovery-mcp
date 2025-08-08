@@ -1,0 +1,1 @@
+{"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "hybrid_search", "arguments": {"query": "CTV gaming ads", "limit": 2}}}
