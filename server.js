@@ -170,7 +170,20 @@ async function semanticSearchAdFormats(query, limit = 5) {
         }
 
         validEmbeddingCount++;
-        const similarity = cosineSimilarity(queryEmbedding, formatEmbedding);
+// Debug the first format's embedding
+if (processedCount === 1) {
+  console.log(`🔍 Query embedding sample: [${queryEmbedding.slice(0, 5).join(', ')}...]`);
+  console.log(`🔍 Format embedding sample: [${formatEmbedding.slice(0, 5).join(', ')}...]`);
+  console.log(`🔍 Query embedding type: ${typeof queryEmbedding[0]}`);
+  console.log(`🔍 Format embedding type: ${typeof formatEmbedding[0]}`);
+}
+
+const similarity = cosineSimilarity(queryEmbedding, formatEmbedding);
+
+// Debug first similarity calculation
+if (processedCount === 1) {
+  console.log(`🔍 First similarity: ${similarity}`);
+}
         return { ...format, similarity };
       })
       .filter(Boolean)
