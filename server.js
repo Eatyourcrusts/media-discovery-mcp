@@ -110,12 +110,12 @@ async function semanticSearchAdFormats(query, limit = 5) {
 
     // Test OpenAI connection
     console.log('🤖 Generating embedding...');
-    const embeddingResponse = await openai.embeddings.create({
+    const response = await openai.embeddings.create({
       model: "text-embedding-3-small",
       input: query,
       dimensions: 1536
     });
-    const queryEmbedding = embeddingResponse.data[0].embedding;
+    const queryEmbedding = response.data[0].embedding;
     console.log(`✅ Embedding generated, dimensions: ${queryEmbedding.length}`);
 
     // Test Supabase connection
