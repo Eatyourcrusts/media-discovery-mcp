@@ -13,7 +13,7 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-const OPENAI_API_KEY = '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';
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 class MediaDiscoveryServer {
   constructor() {

@@ -14,7 +14,7 @@ const path = require('path');
 // Environment variables
 const supabaseUrl = 'https://nlrbtjqwjpernhtvjwrl.supabase.co';
 const supabaseKey = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5scmJ0anF3anBlcm5odHZqd3JsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTQzNzgyMzMsImV4cCI6MjA2OTk1NDIzM30.eNuvT_gH9CrV2kYh50E3GD2hHG2P_DY8r-KgshJwK94';
-const openaiApiKey = process.env.OPENAI_API_KEY || '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';
+const openaiApiKey = process.env.OPENAI_API_KEY;
 
 // Initialize clients
 const supabase = createClient(supabaseUrl, supabaseKey);
