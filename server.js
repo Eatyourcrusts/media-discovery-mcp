@@ -163,12 +163,12 @@ app.post('/api/search-companies', async (req, res) => {
   }
 });
 
-// Main MCP endpoint - supports both SSE (stream) and JSON (non-stream) modes
+// Main MCP endpoint — JSON for UI/probes, short SSE for discovery, long for POST
 app.all('/mcp', async (req, res) => {
   console.log(`🌐 MCP Request: ${req.method} ${req.url}`);
   console.log(`📝 Accept: ${req.get('Accept')}`);
 
-  // Your tools definition in one place
+  // Shared tool definitions
   const toolsArray = [
     {
       name: 'semantic_search_companies',
@@ -196,136 +196,148 @@ app.all('/mcp', async (req, res) => {
     }
   ];
 
-  const wantsSSE = req.get('accept')?.includes('text/event-stream');
-
-  // ==============================
-  // SSE BRANCH
-  // ==============================
-  if (wantsSSE) {
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
+  // Preflight/HEAD: return fast (prevents 524s)
+  if (req.method === 'OPTIONS' || req.method === 'HEAD') {
+    res.set({
       'Access-Control-Allow-Origin': '*',
-      'X-Accel-Buffering': 'no'
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, HEAD',
+      'Access-Control-Allow-Headers': 'Content-Type, Accept, Cache-Control',
+      'Cache-Control': 'no-cache',
+      'Vary': 'Accept',
+    });
+    return res.status(204).end();
+  }
+
+  const accept = (req.get('Accept') || '').toLowerCase();
+  const wantsSSE = accept.includes('text/event-stream');
+
+  // ---------- Non-SSE JSON mode (UI config & non-stream clients) ----------
+  if (!wantsSSE) {
+    res.set({
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'no-cache',
+      'Content-Type': 'application/json',
+      'Vary': 'Accept',
     });
 
-    let connectionActive = true;
-    const sendEvent = (type, data) => {
-      try {
-        res.write(`event: ${type}\n`);
-        res.write(`data: ${JSON.stringify(data)}\n\n`);
-        console.log(`📡 Sending SSE event: ${type}`);
-      } catch (err) {
-        console.error('❌ SSE send error:', err);
-        connectionActive = false;
-      }
-    };
+    if (req.method === 'GET') {
+      return res.status(200).json({ tools: toolsArray });
+    }
 
-    // Handshake
-    sendEvent('server-info', {
-      protocol: 'mcp',
-      version: '2024-11-05',
-      capabilities: { tools: {}, resources: {}, prompts: {} },
-      serverInfo: { name: 'Media Discovery MCP Server', version: '1.0.0' }
-    });
-
-    // Tools in both formats (some clients expect one or the other)
-    sendEvent('tools', toolsArray);
-    sendEvent('tools-list', { tools: toolsArray });
-
-    // Handle incoming POST tool calls
     if (req.method === 'POST') {
-      let requestData = '';
-      req.on('data', chunk => requestData += chunk.toString());
-      req.on('end', async () => {
-        if (!requestData.trim()) return;
+      let body = req.body;
+      if (!body || typeof body !== 'object') {
+        try { body = JSON.parse(body); } catch { body = {}; }
+      }
+      const { method, params, id } = body || {};
+
+      if (method === 'tools/list') {
+        return res.status(200).json({ id: id ?? null, tools: toolsArray });
+      }
+
+      if (method === 'tools/call' && params?.name) {
+        const { name, arguments: args = {} } = params;
+        const q = (args.query ?? '').trim();
+        if (!q) {
+          return res.status(400).json({ id: id ?? null, error: { code: 400, message: `Missing 'query' for tool '${name}'` } });
+        }
         try {
-          const body = JSON.parse(requestData);
-          const { method, params, id } = body;
-          if (method === 'tools/call') {
-            const { name, arguments: args = {} } = params;
-            let result;
-            if (name === 'semantic_search_companies') {
-              result = await semanticSearchCompanies(args.query, args.limit || 5);
-            } else if (name === 'semantic_search_ad_formats') {
-              result = await semanticSearchAdFormats(args.query, args.limit || 5);
-            } else {
-              throw new Error(`Unknown tool: ${name}`);
-            }
-            sendEvent('tool-result', {
-              requestId: id ?? null,
-              result: { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
-            });
+          let result;
+          if (name === 'semantic_search_companies') {
+            result = await semanticSearchCompanies(q, args.limit || 5);
+          } else if (name === 'semantic_search_ad_formats') {
+            result = await semanticSearchAdFormats(q, args.limit || 5);
+          } else {
+            return res.status(404).json({ error: `Unknown tool: ${name}` });
           }
-        } catch (err) {
-          sendEvent('error', { error: { code: -1, message: err.message } });
+          return res.status(200).json({
+            id: id ?? null,
+            result: { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
+          });
+        } catch (e) {
+          return res.status(500).json({ error: e.message || String(e) });
         }
-      });
-    }
-
-    // Heartbeat
-    const heartbeat = setInterval(() => {
-      if (!connectionActive) return clearInterval(heartbeat);
-      sendEvent('ping', { ts: Date.now() });
-    }, 15000);
-
-    req.on('close', () => { connectionActive = false; clearInterval(heartbeat); });
-    return;
-  }
-
-  // ==============================
-  // NON-SSE JSON BRANCH
-  // ==============================
-  res.set({
-    'Access-Control-Allow-Origin': '*',
-    'Cache-Control': 'no-cache',
-    'Content-Type': 'application/json'
-  });
-
-  if (req.method === 'GET') {
-    // Discovery via GET
-    return res.status(200).json({ tools: toolsArray });
-  }
-
-  if (req.method === 'POST') {
-    let body = req.body;
-    if (!body || typeof body !== 'object') {
-      try { body = JSON.parse(body); } catch { body = {}; }
-    }
-    const { method, params, id } = body;
-
-    if (method === 'tools/list') {
-      return res.status(200).json({ id: id ?? null, tools: toolsArray });
-    }
-
-    if (method === 'tools/call' && params?.name) {
-      const { name, arguments: args = {} } = params;
-      if (!args.query) {
-        return res.status(400).json({ error: `Missing required 'query' for tool '${name}'` });
       }
-      try {
-        let result;
-        if (name === 'semantic_search_companies') {
-          result = await semanticSearchCompanies(args.query, args.limit || 5);
-        } else if (name === 'semantic_search_ad_formats') {
-          result = await semanticSearchAdFormats(args.query, args.limit || 5);
-        } else {
-          return res.status(404).json({ error: `Unknown tool: ${name}` });
-        }
-        return res.status(200).json({
-          id: id ?? null,
-          result: { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
-        });
-      } catch (err) {
-        return res.status(500).json({ error: err.message });
-      }
+
+      return res.status(405).json({ error: 'Method not allowed' });
     }
 
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  return res.status(405).json({ error: 'Method not allowed' });
+  // ---------- SSE mode ----------
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    // 👇 Important: tell proxies NOT to compress/transform SSE
+    'Cache-Control': 'no-transform, no-cache',
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': '*',
+    'X-Accel-Buffering': 'no',   // nginx no buffering
+    'Vary': 'Accept',
+  });
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+  const sendEvent = (type, data) => {
+    res.write(`event: ${type}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+    console.log(`📡 Sending SSE event: ${type}`);
+  };
+
+  // Handshake + tools
+  sendEvent('server-info', {
+    protocol: 'mcp',
+    version: '2024-11-05',
+    capabilities: { tools: {}, resources: {}, prompts: {} },
+    serverInfo: { name: 'Media Discovery MCP Server', version: '1.0.0' }
+  });
+  sendEvent('tools', toolsArray);
+  sendEvent('tools-list', { tools: toolsArray });
+
+  // For GET discovery, CLOSE after sending (lets n8n proceed)
+  if (req.method === 'GET') {
+    setTimeout(() => { try { res.end(); } catch {} }, 50);
+    return;
+  }
+
+  // POST over SSE (long-lived tool session)
+  let requestData = '';
+  req.on('data', c => { requestData += c.toString(); });
+  req.on('end', async () => {
+    if (!requestData.trim()) return;
+    try {
+      const { method, params, id } = JSON.parse(requestData);
+      if (method === 'tools/call') {
+        const { name, arguments: args = {} } = params || {};
+        const q = (args.query ?? '').trim();
+        if (!q) {
+          return sendEvent('tool-result', {
+            requestId: id ?? null,
+            result: { content: [{ type: 'text', text: JSON.stringify({ error: `Missing 'query' for tool '${name}'` }, null, 2) }] }
+          });
+        }
+        let result;
+        if (name === 'semantic_search_companies') {
+          result = await semanticSearchCompanies(q, args.limit || 5);
+        } else if (name === 'semantic_search_ad_formats') {
+          result = await semanticSearchAdFormats(q, args.limit || 5);
+        } else {
+          return sendEvent('error', { error: { code: 404, message: `Unknown tool: ${name}` } });
+        }
+        return sendEvent('tool-result', {
+          requestId: id ?? null,
+          result: { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
+        });
+      }
+    } catch (e) {
+      sendEvent('error', { error: { code: 500, message: e.message || String(e) } });
+    }
+  });
+
+  // Keepalive only needed for long POST sessions
+  const keepalive = setInterval(() => {
+    try { sendEvent('ping', { ts: Date.now() }); } catch {}
+  }, 25000);
+  req.on('close', () => clearInterval(keepalive));
 });
 
 
