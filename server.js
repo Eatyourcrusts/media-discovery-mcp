@@ -1,4 +1,4 @@
-// server.js — SSE-compatible MCP server for n8n (Render-ready)
+// server.js — n8n-friendly MCP server (Render/Cloudflare safe)
 const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
@@ -7,65 +7,63 @@ const OpenAI = require('openai');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// ---- Clients ----
+/* ========= Dependencies (lazy) ========= */
 const supabase = createClient(
   'https://nlrbtjqwjpernhtvjwrl.supabase.co',
   process.env.SUPABASE_ANON_KEY
 );
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ---- Middleware ----
-// IMPORTANT: Do NOT enable compression on /mcp; SSE must not be compressed.
+/* ========= Middleware ========= */
+// DO NOT enable compression on /mcp (SSE must be uncompressed)
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'OPTIONS', 'HEAD'],
-  allowedHeaders: ['Content-Type', 'Accept', 'Cache-Control'],
+  allowedHeaders: ['Content-Type', 'Accept', 'Cache-Control', 'Authorization'],
 }));
-app.use(express.json()); // keeps JSON POST simple for non-SSE mode
+app.use(express.json({ limit: '1mb' }));
 
-// ---- Utils ----
+/* ========= Helpers ========= */
 function cosineSimilarity(a, b) {
   if (!a || !b || a.length !== b.length) return 0;
   let dot = 0, na = 0, nb = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    na += a[i] * a[i];
-    nb += b[i] * b[i];
-  }
+  for (let i = 0; i < a.length; i++) { dot += a[i]*b[i]; na += a[i]*a[i]; nb += b[i]*b[i]; }
   if (!na || !nb) return 0;
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
-// ---- Semantic search: Companies ----
-async function semanticSearchCompanies(query, limit = 5) {
-  const emb = await openai.embeddings.create({
+async function embedding(text) {
+  const r = await openai.embeddings.create({
     model: 'text-embedding-3-small',
-    input: query,
+    input: text,
     dimensions: 1536,
   });
-  const qv = emb.data[0].embedding;
+  return r.data[0].embedding;
+}
 
-  const { data: companies, error } = await supabase
+/* ========= Business tools ========= */
+async function semanticSearchCompanies(query, limit = 5) {
+  const qv = await embedding(query);
+  const { data, error } = await supabase
     .from('companies_searchable')
     .select('*')
     .not('embedding', 'is', null)
     .limit(1000);
-  if (error) throw new Error(`Supabase error: ${error.message}`);
+  if (error) throw new Error(error.message);
 
-  const results = companies
+  const results = (data || [])
     .map((c) => {
-      let ev = typeof c.embedding === 'string' ? JSON.parse(c.embedding) : c.embedding;
-      if (!Array.isArray(ev) || ev.length !== 1536) return null;
-      const sim = cosineSimilarity(qv, ev);
-      return { ...c, similarity: sim };
+      let v = typeof c.embedding === 'string' ? JSON.parse(c.embedding) : c.embedding;
+      if (!Array.isArray(v) || v.length !== 1536) return null;
+      return { ...c, similarity: cosineSimilarity(qv, v) };
     })
     .filter(Boolean)
-    .sort((a, b) => b.similarity - a.similarity)
+    .sort((a,b) => b.similarity - a.similarity)
     .slice(0, limit)
     .map((c) => ({
       id: c.id,
       business_name: c.business_name,
-      description: (c.description || '').substring(0, 200) + '...',
+      description: (c.description || '').slice(0, 200) + '...',
       website: c.website,
       media_categories: c.media_categories?.slice(0, 3) || [],
       similarity_score: Number(c.similarity.toFixed(4)),
@@ -75,43 +73,35 @@ async function semanticSearchCompanies(query, limit = 5) {
   return {
     query,
     search_type: 'semantic_similarity',
-    total_evaluated: companies.length,
+    total_evaluated: data?.length || 0,
     results,
     top_similarity: results[0]?.similarity_score || 0,
   };
 }
 
-// ---- Semantic search: Ad Formats ----
 async function semanticSearchAdFormats(query, limit = 5) {
-  const emb = await openai.embeddings.create({
-    model: 'text-embedding-3-small',
-    input: query,
-    dimensions: 1536,
-  });
-  const qv = emb.data[0].embedding;
-
-  const { data: formats, error } = await supabase
+  const qv = await embedding(query);
+  const { data, error } = await supabase
     .from('ad_formats_searchable')
     .select('*')
     .not('embedding', 'is', null)
     .limit(1000);
-  if (error) throw new Error(`Supabase error: ${error.message}`);
+  if (error) throw new Error(error.message);
 
-  const results = formats
+  const results = (data || [])
     .map((f) => {
-      let ev = typeof f.embedding === 'string' ? JSON.parse(f.embedding) : f.embedding;
-      if (!Array.isArray(ev) || ev.length !== 1536) return null;
-      const sim = cosineSimilarity(qv, ev);
-      return { ...f, similarity: sim };
+      let v = typeof f.embedding === 'string' ? JSON.parse(f.embedding) : f.embedding;
+      if (!Array.isArray(v) || v.length !== 1536) return null;
+      return { ...f, similarity: cosineSimilarity(qv, v) };
     })
     .filter(Boolean)
-    .sort((a, b) => b.similarity - a.similarity)
+    .sort((a,b) => b.similarity - a.similarity)
     .slice(0, limit)
     .map((f) => ({
       id: f.id,
       format_name: f.format_name,
       company_name: f.company_name,
-      description: (f.description || '').substring(0, 200) + '...',
+      description: (f.description || '').slice(0, 200) + '...',
       media_categories: f.media_categories?.slice(0, 3) || [],
       campaign_kpis: f.campaign_kpis?.slice(0, 3) || [],
       similarity_score: Number(f.similarity.toFixed(4)),
@@ -121,80 +111,69 @@ async function semanticSearchAdFormats(query, limit = 5) {
   return {
     query,
     search_type: 'semantic_similarity',
-    total_evaluated: formats.length,
+    total_evaluated: data?.length || 0,
     results,
     top_similarity: results[0]?.similarity_score || 0,
   };
 }
 
-// ---- Health ----
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    ts: new Date().toISOString(),
-    tools: ['semantic_search_companies', 'semantic_search_ad_formats'],
-    protocol: 'mcp',
-  });
-});
+/* ========= Tool descriptors (MCP) ========= */
+const TOOLS = [
+  {
+    name: 'semantic_search_companies',
+    description: 'Search for media companies and advertising agencies using semantic similarity',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Natural language search query for companies' },
+        limit: { type: 'number', description: 'Max number of results', default: 5 },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'semantic_search_ad_formats',
+    description: 'Search for advertising formats and products using semantic similarity',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Natural language search query for ad formats' },
+        limit: { type: 'number', description: 'Max number of results', default: 5 },
+      },
+      required: ['query'],
+    },
+  },
+];
 
-// ---- Optional plain JSON APIs ----
+/* ========= Health & plain JSON APIs (optional) ========= */
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok', ts: new Date().toISOString(), tools: TOOLS.map(t => t.name) });
+});
 app.post('/api/search-companies', async (req, res) => {
   try {
     const { query, limit = 5 } = req.body || {};
     if (!query) return res.status(400).json({ error: "Missing 'query'" });
-    const out = await semanticSearchCompanies(query, limit);
-    res.json(out);
-  } catch (e) {
-    res.status(500).json({ error: e.message || String(e) });
-  }
+    res.json(await semanticSearchCompanies(query, limit));
+  } catch (e) { res.status(500).json({ error: e.message || String(e) }); }
 });
 app.post('/api/search-formats', async (req, res) => {
   try {
     const { query, limit = 5 } = req.body || {};
     if (!query) return res.status(400).json({ error: "Missing 'query'" });
-    const out = await semanticSearchAdFormats(query, limit);
-    res.json(out);
-  } catch (e) {
-    res.status(500).json({ error: e.message || String(e) });
-  }
+    res.json(await semanticSearchAdFormats(query, limit));
+  } catch (e) { res.status(500).json({ error: e.message || String(e) }); }
 });
 
-// ---- MCP endpoint (dual mode) ----
+/* ========= MCP endpoint (persistent SSE + JSON fallback) ========= */
 app.all('/mcp', async (req, res) => {
-  console.log(`🌐 MCP ${req.method} /mcp`);
-  const toolsArray = [
-    {
-      name: 'semantic_search_companies',
-      description: 'Search for media companies and advertising agencies using semantic similarity',
-      parameters: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: 'Natural language search query for companies' },
-          limit: { type: 'number', description: 'Maximum number of results to return', default: 5 },
-        },
-        required: ['query'],
-      },
-    },
-    {
-      name: 'semantic_search_ad_formats',
-      description: 'Search for advertising formats and products using semantic similarity',
-      parameters: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: 'Natural language search query for ad formats' },
-          limit: { type: 'number', description: 'Maximum number of results to return', default: 5 },
-        },
-        required: ['query'],
-      },
-    },
-  ];
+  console.log(`🌐 MCP ${req.method} /mcp | Accept=${req.get('Accept')}`);
 
-  // Preflight: return fast
+  // Preflight/HEAD
   if (req.method === 'OPTIONS' || req.method === 'HEAD') {
     res.set({
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, HEAD',
-      'Access-Control-Allow-Headers': 'Content-Type, Accept, Cache-Control',
+      'Access-Control-Allow-Headers': 'Content-Type, Accept, Cache-Control, Authorization',
       'Cache-Control': 'no-cache',
       'Vary': 'Accept',
     });
@@ -204,7 +183,7 @@ app.all('/mcp', async (req, res) => {
   const accept = (req.get('Accept') || '').toLowerCase();
   const wantsSSE = accept.includes('text/event-stream');
 
-  // ---------- Non-SSE JSON mode (UI/probes & simple clients) ----------
+  // ---------- JSON mode (used by n8n UI & some agents) ----------
   if (!wantsSSE) {
     res.set({
       'Access-Control-Allow-Origin': '*',
@@ -214,7 +193,7 @@ app.all('/mcp', async (req, res) => {
     });
 
     if (req.method === 'GET') {
-      return res.status(200).json({ tools: toolsArray });
+      return res.status(200).json({ tools: TOOLS });
     }
 
     if (req.method === 'POST') {
@@ -225,15 +204,14 @@ app.all('/mcp', async (req, res) => {
       const { method, params, id } = body || {};
 
       if (method === 'tools/list') {
-        return res.status(200).json({ id: id ?? null, tools: toolsArray });
+        return res.status(200).json({ id: id ?? null, tools: TOOLS });
       }
 
       if (method === 'tools/call' && params?.name) {
         const { name, arguments: args = {} } = params;
         const q = (args.query ?? '').trim();
-        if (!q) {
-          return res.status(400).json({ id: id ?? null, error: { code: 400, message: `Missing 'query' for tool '${name}'` } });
-        }
+        if (!q) return res.status(400).json({ id: id ?? null, error: { code: 400, message: `Missing 'query' for tool '${name}'` } });
+
         try {
           let result;
           if (name === 'semantic_search_companies') {
@@ -258,93 +236,80 @@ app.all('/mcp', async (req, res) => {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  // ---------- SSE mode ----------
-res.writeHead(200, {
-  'Content-Type': 'text/event-stream',
-  'Cache-Control': 'no-transform, no-cache',
-  'Connection': 'keep-alive',
-  'Access-Control-Allow-Origin': '*',
-  'X-Accel-Buffering': 'no',
-  'Vary': 'Accept',
-});
-if (typeof res.flushHeaders === 'function') res.flushHeaders();
+  // ---------- SSE mode (persistent) ----------
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-transform, no-cache', // stop proxies from mangling SSE
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': '*',
+    'X-Accel-Buffering': 'no',
+    'Vary': 'Accept',
+  });
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
 
-let open = true;
-const sendEvent = (type, data) => {
-  if (!open) return;
-  res.write(`event: ${type}\n`);
-  res.write(`data: ${JSON.stringify(data)}\n\n`);
-  // optional: res.write(`retry: 30000\n\n`); // hint client reconnect delay
-  console.log(`📡 SSE -> ${type}`);
-};
+  let open = true;
+  const send = (type, data) => {
+    if (!open) return;
+    res.write(`event: ${type}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+    // res.write(`retry: 30000\n\n`); // optional reconnection hint
+    // console.log(`📡 SSE -> ${type}`);
+  };
 
-// Handshake + tool discovery
-sendEvent('server-info', {
-  protocol: 'mcp',
-  version: '2024-11-05',
-  capabilities: { tools: {}, resources: {}, prompts: {} },
-  serverInfo: { name: 'Media Discovery MCP Server', version: '1.0.0' },
-});
-sendEvent('tools', toolsArray);
-sendEvent('tools-list', { tools: toolsArray });
-// Also emit a "ready" hint (some clients like it)
-sendEvent('ready', { ok: true });
+  // Handshake + tool discovery
+  send('server-info', {
+    protocol: 'mcp',
+    version: '2024-11-05',
+    capabilities: { tools: {}, resources: {}, prompts: {} },
+    serverInfo: { name: 'Media Discovery MCP Server', version: '1.0.0' },
+  });
+  send('tools', TOOLS);             // array form (what n8n expects)
+  send('tools-list', { tools: TOOLS }); // object form (for other clients)
+  send('ready', { ok: true });
 
-// Do NOT end the stream for GET; keep it open.
-// n8n MCP Client expects a persistent SSE connection.
-
-let requestData = '';
-if (req.method === 'POST') {
-  req.on('data', (c) => (requestData += c.toString()));
-  req.on('end', async () => {
-    if (!requestData.trim()) return;
-    try {
-      const { method, params, id } = JSON.parse(requestData);
-      if (method === 'tools/call') {
-        const { name, arguments: args = {} } = params || {};
-        const q = (args.query ?? '').trim();
-        if (!q) {
-          return sendEvent('tool-result', {
+  // Accept tool calls over same SSE connection if client POSTs bodies here
+  if (req.method === 'POST') {
+    let buf = '';
+    req.on('data', (c) => (buf += c.toString()));
+    req.on('end', async () => {
+      if (!buf.trim()) return;
+      try {
+        const { method, params, id } = JSON.parse(buf);
+        if (method === 'tools/call') {
+          const { name, arguments: args = {} } = params || {};
+          const q = (args.query ?? '').trim();
+          if (!q) {
+            return send('tool-result', {
+              requestId: id ?? null,
+              result: { content: [{ type: 'text', text: JSON.stringify({ error: `Missing 'query' for tool '${name}'` }, null, 2) }] },
+            });
+          }
+          let result;
+          if (name === 'semantic_search_companies') {
+            result = await semanticSearchCompanies(q, args.limit || 5);
+          } else if (name === 'semantic_search_ad_formats') {
+            result = await semanticSearchAdFormats(q, args.limit || 5);
+          } else {
+            return send('error', { error: { code: 404, message: `Unknown tool: ${name}` } });
+          }
+          return send('tool-result', {
             requestId: id ?? null,
-            result: { content: [{ type: 'text', text: JSON.stringify({ error: `Missing 'query' for tool '${name}'` }, null, 2) }] },
+            result: { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] },
           });
         }
-        let result;
-        if (name === 'semantic_search_companies') {
-          result = await semanticSearchCompanies(q, args.limit || 5);
-        } else if (name === 'semantic_search_ad_formats') {
-          result = await semanticSearchAdFormats(q, args.limit || 5);
-        } else {
-          return sendEvent('error', { error: { code: 404, message: `Unknown tool: ${name}` } });
-        }
-        return sendEvent('tool-result', {
-          requestId: id ?? null,
-          result: { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] },
-        });
+      } catch (e) {
+        send('error', { error: { code: 500, message: e.message || String(e) } });
       }
-    } catch (e) {
-      sendEvent('error', { error: { code: 500, message: e.message || String(e) } });
-    }
-  });
-}
+    });
+  }
 
-// Keepalive for ALL SSE connections (GET and POST)
-const keepalive = setInterval(() => {
-  try { sendEvent('ping', { ts: Date.now() }); } catch {}
-}, 25000);
-
-req.on('close', () => { open = false; clearInterval(keepalive); });
-
-
-  // Keepalive for long POST streams
-  const keepalive = setInterval(() => {
-    try { sendEvent('ping', { ts: Date.now() }); } catch {}
-  }, 25000);
-  req.on('close', () => clearInterval(keepalive));
+  // Keep the stream alive (n8n expects persistence)
+  const ping = setInterval(() => { try { send('ping', { ts: Date.now() }); } catch {} }, 25000);
+  req.on('close', () => { open = false; clearInterval(ping); });
 });
 
-// ---- Start ----
+/* ========= Start ========= */
 app.listen(port, '0.0.0.0', () => {
-  console.log(`🚀 MCP Server running on port ${port}`);
+  console.log(`🚀 MCP Server on ${port}`);
   console.log(`📡 SSE endpoint: http://localhost:${port}/mcp`);
 });
