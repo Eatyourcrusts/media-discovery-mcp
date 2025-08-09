@@ -7,7 +7,7 @@ const OpenAI = require('openai');
 const app = express();
 const port = process.env.PORT || 3000;
 
-/* ========= Dependencies (lazy) ========= */
+/* ========= Dependencies ========= */
 const supabase = createClient(
   'https://nlrbtjqwjpernhtvjwrl.supabase.co',
   process.env.SUPABASE_ANON_KEY
@@ -15,7 +15,7 @@ const supabase = createClient(
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* ========= Middleware ========= */
-// DO NOT enable compression on /mcp (SSE must be uncompressed)
+// IMPORTANT: do NOT add compression for /mcp (SSE must be uncompressed)
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'OPTIONS', 'HEAD'],
@@ -52,7 +52,7 @@ async function semanticSearchCompanies(query, limit = 5) {
   if (error) throw new Error(error.message);
 
   const results = (data || [])
-    .map((c) => {
+    .map(c => {
       let v = typeof c.embedding === 'string' ? JSON.parse(c.embedding) : c.embedding;
       if (!Array.isArray(v) || v.length !== 1536) return null;
       return { ...c, similarity: cosineSimilarity(qv, v) };
@@ -60,7 +60,7 @@ async function semanticSearchCompanies(query, limit = 5) {
     .filter(Boolean)
     .sort((a,b) => b.similarity - a.similarity)
     .slice(0, limit)
-    .map((c) => ({
+    .map(c => ({
       id: c.id,
       business_name: c.business_name,
       description: (c.description || '').slice(0, 200) + '...',
@@ -89,7 +89,7 @@ async function semanticSearchAdFormats(query, limit = 5) {
   if (error) throw new Error(error.message);
 
   const results = (data || [])
-    .map((f) => {
+    .map(f => {
       let v = typeof f.embedding === 'string' ? JSON.parse(f.embedding) : f.embedding;
       if (!Array.isArray(v) || v.length !== 1536) return null;
       return { ...f, similarity: cosineSimilarity(qv, v) };
@@ -97,7 +97,7 @@ async function semanticSearchAdFormats(query, limit = 5) {
     .filter(Boolean)
     .sort((a,b) => b.similarity - a.similarity)
     .slice(0, limit)
-    .map((f) => ({
+    .map(f => ({
       id: f.id,
       format_name: f.format_name,
       company_name: f.company_name,
@@ -168,14 +168,17 @@ app.post('/api/search-formats', async (req, res) => {
 app.all('/mcp', async (req, res) => {
   console.log(`🌐 MCP ${req.method} /mcp | Accept=${req.get('Accept')}`);
 
-  // Preflight/HEAD
+  // --- Preflight / HEAD ---
   if (req.method === 'OPTIONS' || req.method === 'HEAD') {
+    const origin = req.get('Origin') || '*';
     res.set({
-      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Origin': origin,
+      'Access-Control-Allow-Credentials': 'true',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, HEAD',
       'Access-Control-Allow-Headers': 'Content-Type, Accept, Cache-Control, Authorization',
+      'Access-Control-Expose-Headers': 'Content-Type, Cache-Control',
       'Cache-Control': 'no-cache',
-      'Vary': 'Accept',
+      'Vary': 'Origin, Accept',
     });
     return res.status(204).end();
   }
@@ -183,13 +186,15 @@ app.all('/mcp', async (req, res) => {
   const accept = (req.get('Accept') || '').toLowerCase();
   const wantsSSE = accept.includes('text/event-stream');
 
-  // ---------- JSON mode (used by n8n UI & some agents) ----------
+  // ---------- JSON mode (UI/probes & non-stream clients) ----------
   if (!wantsSSE) {
+    const origin = req.get('Origin') || '*';
     res.set({
-      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Origin': origin,
+      'Access-Control-Allow-Credentials': 'true',
       'Cache-Control': 'no-cache',
       'Content-Type': 'application/json',
-      'Vary': 'Accept',
+      'Vary': 'Origin, Accept',
     });
 
     if (req.method === 'GET') {
@@ -237,40 +242,46 @@ app.all('/mcp', async (req, res) => {
   }
 
   // ---------- SSE mode (persistent) ----------
+  const origin = req.get('Origin') || '*';
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-transform, no-cache', // stop proxies from mangling SSE
+    'Cache-Control': 'no-transform, no-cache',
     'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': '*',
+    'Keep-Alive': 'timeout=60, max=1000',
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Credentials': 'true',
+    'Access-Control-Expose-Headers': 'Content-Type, Cache-Control',
     'X-Accel-Buffering': 'no',
-    'Vary': 'Accept',
+    'Vary': 'Origin, Accept',
   });
   if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+  // Kick the stream so proxies/browsers see bytes immediately
+  res.write(':\n\n');              // SSE comment (harmless no-op)
+  res.write('retry: 30000\n\n');   // reconnection hint
 
   let open = true;
   const send = (type, data) => {
     if (!open) return;
     res.write(`event: ${type}\n`);
     res.write(`data: ${JSON.stringify(data)}\n\n`);
-    // res.write(`retry: 30000\n\n`); // optional reconnection hint
-    // console.log(`📡 SSE -> ${type}`);
   };
 
-  // Handshake + tool discovery
+  // Handshake + tools
   send('server-info', {
     protocol: 'mcp',
     version: '2024-11-05',
     capabilities: { tools: {}, resources: {}, prompts: {} },
     serverInfo: { name: 'Media Discovery MCP Server', version: '1.0.0' },
   });
-  send('tools', TOOLS);             // array form (what n8n expects)
-  send('tools-list', { tools: TOOLS }); // object form (for other clients)
+  send('tools', TOOLS);               // array form
+  send('tools-list', { tools: TOOLS });// object form
   send('ready', { ok: true });
 
-  // Accept tool calls over same SSE connection if client POSTs bodies here
+  // Accept tool calls over same SSE connection (if client POSTs bodies here)
   if (req.method === 'POST') {
     let buf = '';
-    req.on('data', (c) => (buf += c.toString()));
+    req.on('data', c => (buf += c.toString()));
     req.on('end', async () => {
       if (!buf.trim()) return;
       try {
