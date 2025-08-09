@@ -259,41 +259,43 @@ app.all('/mcp', async (req, res) => {
   }
 
   // ---------- SSE mode ----------
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-transform, no-cache', // critical for Cloudflare/ proxies
-    'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': '*',
-    'X-Accel-Buffering': 'no', // nginx no buffering
-    'Vary': 'Accept',
-  });
-  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+res.writeHead(200, {
+  'Content-Type': 'text/event-stream',
+  'Cache-Control': 'no-transform, no-cache',
+  'Connection': 'keep-alive',
+  'Access-Control-Allow-Origin': '*',
+  'X-Accel-Buffering': 'no',
+  'Vary': 'Accept',
+});
+if (typeof res.flushHeaders === 'function') res.flushHeaders();
 
-  const sendEvent = (type, data) => {
-    res.write(`event: ${type}\n`);
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
-    console.log(`📡 SSE -> ${type}`);
-  };
+let open = true;
+const sendEvent = (type, data) => {
+  if (!open) return;
+  res.write(`event: ${type}\n`);
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+  // optional: res.write(`retry: 30000\n\n`); // hint client reconnect delay
+  console.log(`📡 SSE -> ${type}`);
+};
 
-  // Handshake + tools
-  sendEvent('server-info', {
-    protocol: 'mcp',
-    version: '2024-11-05',
-    capabilities: { tools: {}, resources: {}, prompts: {} },
-    serverInfo: { name: 'Media Discovery MCP Server', version: '1.0.0' },
-  });
-  sendEvent('tools', toolsArray);
-  sendEvent('tools-list', { tools: toolsArray });
+// Handshake + tool discovery
+sendEvent('server-info', {
+  protocol: 'mcp',
+  version: '2024-11-05',
+  capabilities: { tools: {}, resources: {}, prompts: {} },
+  serverInfo: { name: 'Media Discovery MCP Server', version: '1.0.0' },
+});
+sendEvent('tools', toolsArray);
+sendEvent('tools-list', { tools: toolsArray });
+// Also emit a "ready" hint (some clients like it)
+sendEvent('ready', { ok: true });
 
-  // For discovery GET, close quickly so n8n can proceed
-  if (req.method === 'GET') {
-    setTimeout(() => { try { res.end(); } catch {} }, 50);
-    return;
-  }
+// Do NOT end the stream for GET; keep it open.
+// n8n MCP Client expects a persistent SSE connection.
 
-  // For long POST sessions over SSE:
-  let requestData = '';
-  req.on('data', (c) => { requestData += c.toString(); });
+let requestData = '';
+if (req.method === 'POST') {
+  req.on('data', (c) => (requestData += c.toString()));
   req.on('end', async () => {
     if (!requestData.trim()) return;
     try {
@@ -324,6 +326,15 @@ app.all('/mcp', async (req, res) => {
       sendEvent('error', { error: { code: 500, message: e.message || String(e) } });
     }
   });
+}
+
+// Keepalive for ALL SSE connections (GET and POST)
+const keepalive = setInterval(() => {
+  try { sendEvent('ping', { ts: Date.now() }); } catch {}
+}, 25000);
+
+req.on('close', () => { open = false; clearInterval(keepalive); });
+
 
   // Keepalive for long POST streams
   const keepalive = setInterval(() => {
