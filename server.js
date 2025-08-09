@@ -163,50 +163,11 @@ app.post('/api/search-companies', async (req, res) => {
   }
 });
 
-// --- SSE MCP endpoint ---
+// --- Replace your existing /mcp route with this dual-mode version ---
 app.all('/mcp', (req, res) => {
-  console.log(`🌐 MCP SSE Request: ${req.method} ${req.url}`);
+  console.log(`🌐 MCP Request: ${req.method} ${req.url}`);
 
-  // 524 fix: handle preflight & HEAD immediately
-  if (req.method === 'OPTIONS' || req.method === 'HEAD') {
-    res.set({
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, HEAD',
-      'Access-Control-Allow-Headers': 'Content-Type, Accept, Cache-Control',
-      'Cache-Control': 'no-cache'
-    });
-    return res.status(204).end();
-  }
-
-  // SSE headers
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, HEAD',
-    'Access-Control-Allow-Headers': 'Content-Type, Accept, Cache-Control',
-    'X-Accel-Buffering': 'no'
-  });
-
-  if (typeof res.flushHeaders === 'function') res.flushHeaders();
-
-  let connectionActive = true;
-  let requestData = '';
-
-  const sendEvent = (eventType, data) => {
-    if (!connectionActive) return false;
-    try {
-      res.write(`event: ${eventType}\n`);
-      res.write(`data: ${JSON.stringify(data)}\n\n`);
-      return true;
-    } catch {
-      connectionActive = false;
-      return false;
-    }
-  };
-
-  // Tools definition
+  // Shared tool definitions
   const toolsArray = [
     {
       name: 'semantic_search_companies',
@@ -234,7 +195,100 @@ app.all('/mcp', (req, res) => {
     }
   ];
 
-  // Initial handshake
+  // 1) Preflight/HEAD quick exit
+  if (req.method === 'OPTIONS' || req.method === 'HEAD') {
+    res.set({
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, HEAD',
+      'Access-Control-Allow-Headers': 'Content-Type, Accept, Cache-Control',
+      'Cache-Control': 'no-cache'
+    });
+    return res.status(204).end();
+  }
+
+  const accept = (req.get('Accept') || '').toLowerCase();
+  const wantsSSE = accept.includes('text/event-stream');
+
+  // 2) Non-SSE JSON mode (useful for n8n UI and clients that don’t stream)
+  if (!wantsSSE) {
+    res.set({
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'no-cache',
+      'Content-Type': 'application/json'
+    });
+
+    if (req.method === 'GET') {
+      // Tool discovery as JSON
+      return res.status(200).json({ tools: toolsArray });
+    }
+
+    if (req.method === 'POST') {
+      // Tool call as JSON (no streaming)
+      let body = req.body;
+      // Some proxies send raw body — guard for that:
+      if (!body || typeof body !== 'object') {
+        try { body = JSON.parse(body); } catch { /* ignore */ }
+      }
+      const { method, params, id } = body || {};
+      if (method !== 'tools/call' || !params?.name) {
+        return res.status(400).json({ error: 'Invalid tool call' });
+      }
+      const { name, arguments: args = {} } = params;
+
+      (async () => {
+        try {
+          let result;
+          if (name === 'semantic_search_companies') {
+            result = await semanticSearchCompanies(args.query, args.limit || 5);
+          } else if (name === 'semantic_search_ad_formats') {
+            result = await semanticSearchAdFormats(args.query, args.limit || 5);
+          } else {
+            return res.status(404).json({ error: `Unknown tool: ${name}` });
+          }
+          // Return a simple MCP-like JSON shape
+          return res.status(200).json({
+            id: id ?? null,
+            result: { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
+          });
+        } catch (e) {
+          return res.status(500).json({ error: e.message || String(e) });
+        }
+      })();
+      return; // prevent falling through
+    }
+
+    // Any other method
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+
+  // 3) SSE mode (streaming) for real MCP clients
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, HEAD',
+    'Access-Control-Allow-Headers': 'Content-Type, Accept, Cache-Control',
+    'X-Accel-Buffering': 'no'
+  });
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+  let connectionActive = true;
+  let requestData = '';
+
+  const sendEvent = (event, data) => {
+    if (!connectionActive) return false;
+    try {
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+      return true;
+    } catch {
+      connectionActive = false;
+      return false;
+    }
+  };
+
+  // Handshake
   sendEvent('server-info', {
     protocol: 'mcp',
     version: '2024-11-05',
@@ -242,39 +296,40 @@ app.all('/mcp', (req, res) => {
     serverInfo: { name: 'Media Discovery MCP Server', version: '1.0.0' }
   });
 
-  // n8n expects these
-  sendEvent('tools', toolsArray);
-  sendEvent('tools-list', { tools: toolsArray });
+  // Discovery (send both forms for compatibility)
+  sendEvent('tools', toolsArray);            // array form
+  sendEvent('tools-list', { tools: toolsArray }); // object form
 
-  // Handle POST tool calls
+  // Streaming tool calls (POST over the same route)
   if (req.method === 'POST') {
-    req.on('data', chunk => { requestData += chunk.toString(); });
+    req.on('data', c => { requestData += c.toString(); });
     req.on('end', async () => {
       if (!requestData.trim()) return;
       try {
-        const request = JSON.parse(requestData);
-        if (request.method === 'tools/call') {
-          const { name, arguments: args } = request.params;
+        const payload = JSON.parse(requestData);
+        const { method, params, id } = payload || {};
+        if (method === 'tools/call') {
+          const { name, arguments: args = {} } = params || {};
           let result;
           if (name === 'semantic_search_companies') {
             result = await semanticSearchCompanies(args.query, args.limit || 5);
           } else if (name === 'semantic_search_ad_formats') {
             result = await semanticSearchAdFormats(args.query, args.limit || 5);
           } else {
-            throw new Error(`Unknown tool: ${name}`);
+            return sendEvent('error', { error: { code: 404, message: `Unknown tool: ${name}` } });
           }
-          sendEvent('tool-result', {
-            requestId: request.id,
+          return sendEvent('tool-result', {
+            requestId: id ?? null,
             result: { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
           });
         }
-      } catch (error) {
-        sendEvent('error', { error: { code: -1, message: error.message } });
+      } catch (e) {
+        sendEvent('error', { error: { code: 500, message: e.message || String(e) } });
       }
     });
   }
 
-  // Heartbeat
+  // Keepalive
   const keepalive = setInterval(() => {
     if (!connectionActive) return clearInterval(keepalive);
     sendEvent('ping', { ts: Date.now() });
@@ -284,6 +339,7 @@ app.all('/mcp', (req, res) => {
   req.on('error', () => { connectionActive = false; clearInterval(keepalive); });
   req.on('aborted', () => { connectionActive = false; clearInterval(keepalive); });
 });
+
 
 // Start server
 app.listen(port, '0.0.0.0', () => {
